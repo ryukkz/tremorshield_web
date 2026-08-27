@@ -30,6 +30,7 @@ let eventBuffer = [];
 let dragState = { dragging: false, x: 100, y: 100, size: 60 };
 // target_selection state
 let fittsTarget = null;
+let trackingPhase = 0;
 // double-click heuristic state (mirrors task_protocol_gui.py _on_canvas_click)
 let lastClickTime = 0;
 let lastClickPos = [0, 0];
@@ -162,10 +163,42 @@ function spawnFittsTarget() {
   fittsTarget = { x, y, r };
 }
 
+function renderTrackingTarget() {
+  const elapsed = Math.max(0, (performance.now() - (taskEndAt - TASK_INFO[currentTask].duration * 1000)) / 1000);
+  const speed = currentTask === "fast" ? 520 : currentTask === "slow" ? 90 : 220;
+  const margin = 70;
+  const usableW = Math.max(200, canvas.width - margin * 2);
+  const usableH = Math.max(160, canvas.height - margin * 2);
+  let x, y;
+
+  if (currentTask === "fast") {
+    const travel = (elapsed * speed) % (usableW * 2);
+    const px = travel <= usableW ? travel : usableW * 2 - travel;
+    x = margin + px;
+    y = canvas.height / 2 + Math.sin(elapsed * 3.5) * Math.min(usableH * 0.35, 180);
+  } else if (currentTask === "slow") {
+    const a = elapsed * 0.55;
+    x = canvas.width / 2 + Math.cos(a) * Math.min(usableW * 0.42, 360);
+    y = canvas.height / 2 + Math.sin(a) * Math.min(usableH * 0.35, 220);
+  } else {
+    const a = elapsed * 0.9;
+    x = canvas.width / 2 + Math.cos(a) * Math.min(usableW * 0.40, 380);
+    y = canvas.height / 2 + Math.sin(a * 1.35) * Math.min(usableH * 0.30, 190);
+  }
+
+  drawTarget(x, y, 24, "#2563eb");
+  ctx.beginPath();
+  ctx.arc(x, y, 7, 0, Math.PI * 2);
+  ctx.fillStyle = "#fff";
+  ctx.fill();
+}
+
 function renderFrame() {
   ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-  if (currentTask === "click" || currentTask === "double_click") {
+  if (currentTask === "normal" || currentTask === "fast" || currentTask === "slow") {
+    renderTrackingTarget();
+  } else if (currentTask === "click" || currentTask === "double_click") {
     drawTarget(canvas.width / 2, canvas.height / 2, 30, "red");
   } else if (currentTask === "drag") {
     ctx.fillStyle = "blue";
@@ -183,7 +216,7 @@ function renderFrame() {
     ctx.strokeRect(cx - box, cy - box, box * 2, box * 2);
     drawTarget(cx, cy, 10, "red");
   }
-  // normal / fast / slow / idle: no target drawn, matches desktop version
+  // idle intentionally has no visual target.
 }
 
 // ---------------------------------------------------------------------
@@ -205,14 +238,11 @@ function showInstructions(task) {
     `TASK ${taskIndex}/${TASK_ORDER.length}: ${task.toUpperCase()}`;
   document.getElementById("instr-body").textContent = TASK_INFO[task].instructions;
 
-  function onSpace(e) {
-    if (e.code === "Space") {
-      document.removeEventListener("keydown", onSpace);
-      runTask(task);
-    }
-  }
-  document.addEventListener("keydown", onSpace);
+  const btn = document.getElementById("startTaskBtn");
+  btn.onclick = () => runTask(task);
+  btn.focus();
 }
+
 
 function runTask(task) {
   currentTask = task;
@@ -220,6 +250,7 @@ function runTask(task) {
   resizeCanvas();
   dragState = { dragging: false, x: 100, y: 100, size: 60 };
   fittsTarget = null;
+  eventBuffer = [];
   taskEndAt = performance.now() + TASK_INFO[task].duration * 1000;
 
   flushHandle = setInterval(flushBuffer, 150);

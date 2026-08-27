@@ -55,14 +55,14 @@ TASK_ORDER = [
 ]
 
 TASK_INFO = {
-    "normal": {"duration": 60, "instructions": "Move the mouse freely and naturally around the screen.\nNo target — just move as you normally would."},
-    "fast": {"duration": 60, "instructions": "Move the mouse pointer quickly back and forth across the screen."},
-    "slow": {"duration": 60, "instructions": "Move the mouse pointer slowly and deliberately,\nas if being very careful and precise."},
-    "click": {"duration": 60, "instructions": "Click the red target circle repeatedly.\nClick at whatever pace feels natural."},
-    "double_click": {"duration": 60, "instructions": "Double-click the red target circle repeatedly."},
-    "drag": {"duration": 60, "instructions": "Click and drag the blue square into the green box.\nRelease it inside, then drag it back out and repeat."},
-    "target_selection": {"duration": 90, "instructions": "Click each orange target as soon as it appears.\nTargets vary in size and distance."},
-    "precision": {"duration": 60, "instructions": "Make small, careful movements and clicks\nconfined to the marked box in the center."},
+    "normal": {"duration": 30, "instructions": "Track the moving target with your mouse.\nFollow it at a comfortable, natural speed."},
+    "fast": {"duration": 30, "instructions": "Track the moving target with your mouse.\nFollow the target as quickly and accurately as you can."},
+    "slow": {"duration": 30, "instructions": "Track the moving target with your mouse.\nFollow it slowly and smoothly without rushing."},
+    "click": {"duration": 30, "instructions": "Click the red target circle repeatedly.\nClick at whatever pace feels natural."},
+    "double_click": {"duration": 30, "instructions": "Double-click the red target circle repeatedly."},
+    "drag": {"duration": 30, "instructions": "Click and drag the blue square into the green box.\nRelease it inside, then drag it back out and repeat."},
+    "target_selection": {"duration": 30, "instructions": "Click each orange target as soon as it appears.\nTargets vary in size and distance."},
+    "precision": {"duration": 30, "instructions": "Make small, careful movements and clicks\nconfined to the marked box in the center."},
     "idle": {"duration": 30, "instructions": "Rest your hand on the mouse.\nDo not move it intentionally for the full duration."},
 }
 
@@ -190,13 +190,20 @@ async def ws_endpoint(websocket: WebSocket, session_uuid: str):
                 for t in remaining_tasks:
                     rows = sess.pop_rows_for_task(t)
                     sess.write_csv(rows, t)
+                combined_path = combine_session_csvs(sess)
                 sess.finished = True
                 zip_path = zip_session(sess)
-                emailed = try_email_zip(zip_path, sess)
+                emailed, email_error = try_email_zip(zip_path, combined_path, sess)
+                if emailed:
+                    message = "Session data saved and emailed to the study admin."
+                elif email_error:
+                    message = "Session data saved on the server, but the email could not be sent. The study admin can download it from the admin endpoint."
+                else:
+                    message = "Session data saved on the server. Email is not configured."
                 await websocket.send_json({
                     "type": "finished",
                     "emailed": emailed,
-                    "message": "Session data saved on the server." + (" A copy was emailed to the study admin." if emailed else ""),
+                    "message": message,
                 })
                 break
 
@@ -219,25 +226,100 @@ def zip_session(sess: ServerSession) -> Path:
     return zip_path
 
 
-def try_email_zip(zip_path: Path, sess: ServerSession) -> bool:
-    if not (SMTP_HOST and SMTP_USER and SMTP_PASS and ADMIN_EMAIL):
-        return False
-    try:
-        msg = EmailMessage()
-        msg["Subject"] = f"TREMORSHIELD data — {sess.user_id} session {sess.session_id}"
-        msg["From"] = SMTP_USER
-        msg["To"] = ADMIN_EMAIL
-        msg.set_content(f"Attached: session data for participant {sess.user_id}, session {sess.session_id}.")
-        with open(zip_path, "rb") as f:
-            msg.add_attachment(f.read(), maintype="application", subtype="zip", filename=zip_path.name)
-        with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
-            server.starttls()
-            server.login(SMTP_USER, SMTP_PASS)
+def combine_session_csvs(sess: ServerSession) -> Path:
+    """Create one combined CSV for convenient analysis/email."""
+    combined = sess.out_dir / f"{sess.user_id}_s{sess.session_id:02d}_ALL_TASKS.csv"
+    csv_files = sorted(sess.out_dir.glob("*.csv"))
+    # Do not include an old combined file if a session is retried.
+    csv_files = [p for p in csv_files if p != combined]
+    with open(combined, "w", newline="", encoding="utf-8") as out_f:
+        writer = csv.writer(out_f)
+        writer.writerow(HEADER)
+        for csv_file in csv_files:
+            with open(csv_file, newline="", encoding="utf-8") as in_f:
+                reader = csv.reader(in_f)
+                next(reader, None)
+                writer.writerows(reader)
+    return combined
+
+
+def _send_email(host, port, user, password, msg):
+    """Send using STARTTLS (587) or implicit SSL (465)."""
+    if port == 465:
+        with smtplib.SMTP_SSL(host, port, timeout=20) as server:
+            server.login(user, password)
             server.send_message(msg)
-        return True
-    except Exception as e:
-        print(f"[email] failed to send {zip_path}: {e}")
-        return False
+    else:
+        with smtplib.SMTP(host, port, timeout=20) as server:
+            server.ehlo()
+            server.starttls()
+            server.ehlo()
+            server.login(user, password)
+            server.send_message(msg)
+
+
+def try_email_zip(zip_path: Path, combined_path: Path, sess: ServerSession):
+    """Email both the ZIP archive and the single combined CSV.
+
+    Returns (success, error_message). Tries the configured port first and
+    then the common Gmail SSL port if the configured port is 587.
+    """
+    if not (SMTP_HOST and SMTP_USER and SMTP_PASS and ADMIN_EMAIL):
+        return False, None
+
+    msg = EmailMessage()
+    msg["Subject"] = f"TREMORSHIELD data — {sess.user_id} session {sess.session_id}"
+    msg["From"] = SMTP_USER
+    msg["To"] = ADMIN_EMAIL
+    msg.set_content(
+        f"TREMORSHIELD session data for participant {sess.user_id}, "
+        f"session {sess.session_id}.\n\n"
+        "Attachments: one combined CSV and the ZIP containing the individual task CSV files."
+    )
+    with open(zip_path, "rb") as f:
+        msg.add_attachment(f.read(), maintype="application", subtype="zip", filename=zip_path.name)
+    with open(combined_path, "rb") as f:
+        msg.add_attachment(f.read(), maintype="text", subtype="csv", filename=combined_path.name)
+
+    ports = [SMTP_PORT]
+    if SMTP_PORT == 587:
+        ports.append(465)
+    errors = []
+    for port in ports:
+        try:
+            _send_email(SMTP_HOST, port, SMTP_USER, SMTP_PASS, msg)
+            print(f"[email] sent successfully to {ADMIN_EMAIL} via {SMTP_HOST}:{port}")
+            return True, None
+        except Exception as e:
+            errors.append(f"port {port}: {type(e).__name__}: {e}")
+            print(f"[email] failed via {SMTP_HOST}:{port}: {type(e).__name__}: {e}")
+    return False, " | ".join(errors)
+
+
+# ---------------------------------------------------------------------------
+# Email test endpoint. Useful for verifying SMTP settings before collecting
+# participant data.
+# ---------------------------------------------------------------------------
+@app.post("/admin/test_email")
+def test_email(token: str = Query(...)):
+    if token != ADMIN_TOKEN:
+        raise HTTPException(403, "bad token")
+    if not (SMTP_HOST and SMTP_USER and SMTP_PASS and ADMIN_EMAIL):
+        raise HTTPException(400, "SMTP environment variables are not configured")
+    msg = EmailMessage()
+    msg["Subject"] = "TREMORSHIELD test email"
+    msg["From"] = SMTP_USER
+    msg["To"] = ADMIN_EMAIL
+    msg.set_content("TREMORSHIELD email configuration is working.")
+    ports = [SMTP_PORT] + ([465] if SMTP_PORT == 587 else [])
+    errors = []
+    for port in ports:
+        try:
+            _send_email(SMTP_HOST, port, SMTP_USER, SMTP_PASS, msg)
+            return {"ok": True, "message": f"Test email sent to {ADMIN_EMAIL} via port {port}."}
+        except Exception as e:
+            errors.append(f"port {port}: {type(e).__name__}: {e}")
+    raise HTTPException(502, "Email send failed: " + " | ".join(errors))
 
 
 # ---------------------------------------------------------------------------
