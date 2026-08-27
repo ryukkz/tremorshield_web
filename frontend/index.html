@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<title>TREMORSHIELD Data Collection</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<div id="screen-login" class="screen">
+  <div class="card">
+    <h1>TREMORSHIELD</h1>
+    <p class="sub">Mouse movement data collection</p>
+    <label>Participant ID<input id="userId" type="text" placeholder="u01" /></label>
+    <label>Session number<input id="sessionId" type="number" value="1" min="1" /></label>
+    <button id="beginBtn">Begin Session</button>
+    <p class="hint">This will go fullscreen and record your mouse movements
+      for the duration of each task. Please stay in this tab for the whole session.</p>
+  </div>
+</div>
+
+<div id="screen-instructions" class="screen hidden">
+  <div class="card">
+    <h2 id="instr-title"></h2>
+    <pre id="instr-body"></pre>
+    <p class="hint">Press SPACE to begin</p>
+  </div>
+</div>
+
+<div id="screen-task" class="screen hidden">
+  <canvas id="stage"></canvas>
+  <div id="hud"><span id="hud-task"></span> — <span id="hud-time"></span>s remaining</div>
+</div>
+
+<div id="screen-done" class="screen hidden">
+  <div class="card">
+    <h2>Session complete</h2>
+    <p id="done-msg">Saving your data…</p>
+  </div>
+</div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
