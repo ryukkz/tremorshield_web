@@ -15,12 +15,14 @@ import csv
 import io
 import os
 import shutil
-import smtplib
 import time
 import uuid
+import base64
+import json
+import urllib.error
+import urllib.request
 import zipfile
 from dataclasses import dataclass, field
-from email.message import EmailMessage
 from pathlib import Path
 from threading import Lock
 
@@ -35,10 +37,11 @@ FRONTEND_DIR = BASE_DIR / "frontend"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 ADMIN_TOKEN = os.environ.get("ADMIN_TOKEN", "changeme")
-SMTP_HOST = os.environ.get("SMTP_HOST")
-SMTP_PORT = int(os.environ.get("SMTP_PORT", "587"))
-SMTP_USER = os.environ.get("SMTP_USER")
-SMTP_PASS = os.environ.get("SMTP_PASS")
+# Brevo HTTP API settings. This uses HTTPS (port 443), so it works on
+# hosting platforms that block direct SMTP connections.
+BREVO_API_KEY = os.environ.get("BREVO_API_KEY")
+BREVO_SENDER_EMAIL = os.environ.get("BREVO_SENDER_EMAIL")
+BREVO_SENDER_NAME = os.environ.get("BREVO_SENDER_NAME", "TREMORSHIELD")
 ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL")
 
 HEADER = ["timestamp", "x", "y", "dx", "dy", "velocity", "acceleration",
@@ -243,83 +246,123 @@ def combine_session_csvs(sess: ServerSession) -> Path:
     return combined
 
 
-def _send_email(host, port, user, password, msg):
-    """Send using STARTTLS (587) or implicit SSL (465)."""
-    if port == 465:
-        with smtplib.SMTP_SSL(host, port, timeout=20) as server:
-            server.login(user, password)
-            server.send_message(msg)
-    else:
-        with smtplib.SMTP(host, port, timeout=20) as server:
-            server.ehlo()
-            server.starttls()
-            server.ehlo()
-            server.login(user, password)
-            server.send_message(msg)
+def _brevo_attachment(path: Path):
+    with open(path, "rb") as f:
+        content = base64.b64encode(f.read()).decode("ascii")
+    return {"name": path.name, "content": content}
+
+
+def _send_email_brevo(zip_path: Path, combined_path: Path, sess: ServerSession):
+    """Send session data through Brevo's HTTPS API (TCP 443)."""
+    payload = {
+        "sender": {
+            "name": BREVO_SENDER_NAME,
+            "email": BREVO_SENDER_EMAIL,
+        },
+        "to": [{"email": ADMIN_EMAIL}],
+        "subject": f"TREMORSHIELD data — {sess.user_id} session {sess.session_id}",
+        "textContent": (
+            f"TREMORSHIELD session data for participant {sess.user_id}, "
+            f"session {sess.session_id}.\n\n"
+            "Attachments: one combined CSV and the ZIP containing the "
+            "individual task CSV files."
+        ),
+        "attachment": [
+            _brevo_attachment(zip_path),
+            _brevo_attachment(combined_path),
+        ],
+    }
+
+    body = json.dumps(payload).encode("utf-8")
+    request = urllib.request.Request(
+        "https://api.brevo.com/v3/smtp/email",
+        data=body,
+        method="POST",
+        headers={
+            "accept": "application/json",
+            "api-key": BREVO_API_KEY,
+            "content-type": "application/json",
+        },
+    )
+
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            response_body = response.read().decode("utf-8", errors="replace")
+            if 200 <= response.status < 300:
+                print(f"[email] sent successfully to {ADMIN_EMAIL} via Brevo HTTPS")
+                return True, None
+            return False, f"Brevo HTTP {response.status}: {response_body}"
+    except urllib.error.HTTPError as e:
+        details = e.read().decode("utf-8", errors="replace")
+        return False, f"Brevo HTTP {e.code}: {details}"
+    except Exception as e:
+        return False, f"{type(e).__name__}: {e}"
 
 
 def try_email_zip(zip_path: Path, combined_path: Path, sess: ServerSession):
-    """Email both the ZIP archive and the single combined CSV.
+    """Email the ZIP archive and combined CSV through Brevo's HTTPS API.
 
-    Returns (success, error_message). Tries the configured port first and
-    then the common Gmail SSL port if the configured port is 587.
+    Returns (success, error_message). If the Brevo settings are absent,
+    returns (False, None) so email remains optional.
     """
-    if not (SMTP_HOST and SMTP_USER and SMTP_PASS and ADMIN_EMAIL):
+    if not (BREVO_API_KEY and BREVO_SENDER_EMAIL and ADMIN_EMAIL):
         return False, None
 
-    msg = EmailMessage()
-    msg["Subject"] = f"TREMORSHIELD data — {sess.user_id} session {sess.session_id}"
-    msg["From"] = SMTP_USER
-    msg["To"] = ADMIN_EMAIL
-    msg.set_content(
-        f"TREMORSHIELD session data for participant {sess.user_id}, "
-        f"session {sess.session_id}.\n\n"
-        "Attachments: one combined CSV and the ZIP containing the individual task CSV files."
-    )
-    with open(zip_path, "rb") as f:
-        msg.add_attachment(f.read(), maintype="application", subtype="zip", filename=zip_path.name)
-    with open(combined_path, "rb") as f:
-        msg.add_attachment(f.read(), maintype="text", subtype="csv", filename=combined_path.name)
-
-    ports = [SMTP_PORT]
-    if SMTP_PORT == 587:
-        ports.append(465)
-    errors = []
-    for port in ports:
-        try:
-            _send_email(SMTP_HOST, port, SMTP_USER, SMTP_PASS, msg)
-            print(f"[email] sent successfully to {ADMIN_EMAIL} via {SMTP_HOST}:{port}")
-            return True, None
-        except Exception as e:
-            errors.append(f"port {port}: {type(e).__name__}: {e}")
-            print(f"[email] failed via {SMTP_HOST}:{port}: {type(e).__name__}: {e}")
-    return False, " | ".join(errors)
+    return _send_email_brevo(zip_path, combined_path, sess)
 
 
 # ---------------------------------------------------------------------------
-# Email test endpoint. Useful for verifying SMTP settings before collecting
+# Email test endpoint. Useful for verifying Brevo settings before collecting
 # participant data.
 # ---------------------------------------------------------------------------
 @app.post("/admin/test_email")
 def test_email(token: str = Query(...)):
     if token != ADMIN_TOKEN:
         raise HTTPException(403, "bad token")
-    if not (SMTP_HOST and SMTP_USER and SMTP_PASS and ADMIN_EMAIL):
-        raise HTTPException(400, "SMTP environment variables are not configured")
-    msg = EmailMessage()
-    msg["Subject"] = "TREMORSHIELD test email"
-    msg["From"] = SMTP_USER
-    msg["To"] = ADMIN_EMAIL
-    msg.set_content("TREMORSHIELD email configuration is working.")
-    ports = [SMTP_PORT] + ([465] if SMTP_PORT == 587 else [])
-    errors = []
-    for port in ports:
-        try:
-            _send_email(SMTP_HOST, port, SMTP_USER, SMTP_PASS, msg)
-            return {"ok": True, "message": f"Test email sent to {ADMIN_EMAIL} via port {port}."}
-        except Exception as e:
-            errors.append(f"port {port}: {type(e).__name__}: {e}")
-    raise HTTPException(502, "Email send failed: " + " | ".join(errors))
+    if not (BREVO_API_KEY and BREVO_SENDER_EMAIL and ADMIN_EMAIL):
+        raise HTTPException(
+            400,
+            "BREVO_API_KEY, BREVO_SENDER_EMAIL and ADMIN_EMAIL are not configured",
+        )
+
+    # Use a tiny text-only test request rather than attaching session files.
+    payload = {
+        "sender": {
+            "name": BREVO_SENDER_NAME,
+            "email": BREVO_SENDER_EMAIL,
+        },
+        "to": [{"email": ADMIN_EMAIL}],
+        "subject": "TREMORSHIELD test email",
+        "textContent": "TREMORSHIELD Brevo email configuration is working.",
+    }
+
+    request = urllib.request.Request(
+        "https://api.brevo.com/v3/smtp/email",
+        data=json.dumps(payload).encode("utf-8"),
+        method="POST",
+        headers={
+            "accept": "application/json",
+            "api-key": BREVO_API_KEY,
+            "content-type": "application/json",
+        },
+    )
+
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            if 200 <= response.status < 300:
+                return {
+                    "ok": True,
+                    "message": f"Test email sent to {ADMIN_EMAIL} via Brevo HTTPS.",
+                }
+            details = response.read().decode("utf-8", errors="replace")
+            raise HTTPException(502, f"Brevo HTTP {response.status}: {details}")
+    except urllib.error.HTTPError as e:
+        details = e.read().decode("utf-8", errors="replace")
+        raise HTTPException(502, f"Brevo HTTP {e.code}: {details}")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(502, f"Brevo request failed: {type(e).__name__}: {e}")
 
 
 # ---------------------------------------------------------------------------

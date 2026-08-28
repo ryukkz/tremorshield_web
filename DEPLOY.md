@@ -46,7 +46,7 @@ want to keep it up afterward.
 fly launch          # accept defaults, say yes to a Dockerfile-based app
 fly volumes create tremordata --size 1   # persistent volume for data/
 # edit fly.toml to mount it at /app/data, then:
-fly secrets set ADMIN_TOKEN=... SMTP_HOST=... SMTP_USER=... SMTP_PASS=... ADMIN_EMAIL=...
+fly secrets set ADMIN_TOKEN=... BREVO_API_KEY=... BREVO_SENDER_EMAIL=... BREVO_SENDER_NAME=TREMORSHIELD ADMIN_EMAIL=...
 fly deploy
 ```
 
@@ -74,11 +74,11 @@ Caddy handles the TLS certificate automatically.
 ## 3. Getting data back to you automatically
 Two options, not mutually exclusive:
 
-- **Email (fully automatic):** fill in `SMTP_HOST` / `SMTP_USER` /
-  `SMTP_PASS` / `ADMIN_EMAIL` in `.env`. For Gmail, use an **App Password**
-  (Google Account → Security → 2-Step Verification → App passwords), not
-  your normal password. Every finished session gets zipped and emailed to
-  you the moment the participant finishes.
+- **Email (fully automatic):** use Brevo's HTTP email API. Set
+  `BREVO_API_KEY`, `BREVO_SENDER_EMAIL`, `BREVO_SENDER_NAME`, and
+  `ADMIN_EMAIL` in `.env` (or your hosting provider's environment settings).
+  Verify the sender address in Brevo first. The app sends email through
+  Brevo's HTTPS API, so it does not require SMTP ports 465/587.
 - **Manual pull, no email setup needed:**
   ```
   GET https://your-host/admin/sessions?token=YOUR_ADMIN_TOKEN        # list
