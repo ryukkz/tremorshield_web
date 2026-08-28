@@ -44,8 +44,12 @@ BREVO_SENDER_EMAIL = os.environ.get("BREVO_SENDER_EMAIL")
 BREVO_SENDER_NAME = os.environ.get("BREVO_SENDER_NAME", "TREMORSHIELD")
 ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL")
 
-HEADER = ["timestamp", "x", "y", "dx", "dy", "velocity", "acceleration",
-          "event", "button", "drag", "task", "session_id", "user_id"]
+HEADER = ["timestamp", "elapsed_sec", "dt",
+          "user_id", "session_id", "trial_id",
+          "task", "action_type", "event", "button", "drag",
+          "x", "y", "dx", "dy", "velocity", "acceleration", "direction_change",
+          "target_x", "target_y", "target_width", "target_height", "target_id",
+          "screen_width", "screen_height"]
 
 # ---------------------------------------------------------------------------
 # Same task table as task_protocol_gui.py (minus Tkinter rendering details;
@@ -88,9 +92,17 @@ class ServerSession:
     last_x: float = None
     last_y: float = None
     last_v: float = None
+    last_dx: float = None
+    last_dy: float = None
+    task_start_t: float = None
+    trial_id: int = None
+    screen_width: int = None
+    screen_height: int = None
     finished: bool = False
 
-    def record(self, t, x, y, event, button="none"):
+    def record(self, t, x, y, event, button="none", trial_id=None,
+               target_x=None, target_y=None, target_width=None, target_height=None,
+               target_id=None, screen_width=None, screen_height=None):
         with self.lock:
             if event == "press":
                 self.drag_active = True
@@ -98,29 +110,59 @@ class ServerSession:
                 self.drag_active = False
 
             if self.last_t is None:
+                dt = 0.0
                 dx = dy = 0.0
                 velocity = 0.0
                 acceleration = 0.0
+                direction_change = 0.0
             else:
                 dt = max(t - self.last_t, 1e-4)
                 dx = x - self.last_x
                 dy = y - self.last_y
                 velocity = (dx ** 2 + dy ** 2) ** 0.5 / dt
                 acceleration = (velocity - (self.last_v or 0.0)) / dt
+                if self.last_dx is not None and self.last_dy is not None and (self.last_dx != 0 or self.last_dy != 0) and (dx != 0 or dy != 0):
+                    import math
+                    dot = self.last_dx * dx + self.last_dy * dy
+                    mag = math.hypot(self.last_dx, self.last_dy) * math.hypot(dx, dy)
+                    direction_change = math.acos(max(-1.0, min(1.0, dot / mag))) if mag else 0.0
+                else:
+                    direction_change = 0.0
+
+            if self.task_start_t is None or (trial_id is not None and trial_id != self.trial_id):
+                self.task_start_t = t
+            if trial_id is not None:
+                self.trial_id = trial_id
+            if screen_width is not None:
+                self.screen_width = screen_width
+            if screen_height is not None:
+                self.screen_height = screen_height
+
+            action_type = {
+                "move": "mouse_move",
+                "press": "button_press",
+                "release": "button_release",
+                "double_click": "double_click",
+            }.get(event, event)
+            elapsed_sec = max(0.0, t - self.task_start_t)
 
             self.rows.append([
-                t, x, y, dx, dy, velocity, acceleration,
-                event, button, self.drag_active, self.current_task,
-                self.session_id, self.user_id,
+                t, elapsed_sec, dt,
+                self.user_id, self.session_id, self.trial_id,
+                self.current_task, action_type, event, button, self.drag_active,
+                x, y, dx, dy, velocity, acceleration, direction_change,
+                target_x, target_y, target_width, target_height, target_id,
+                self.screen_width, self.screen_height,
             ])
             self.last_t, self.last_x, self.last_y, self.last_v = t, x, y, velocity
+            self.last_dx, self.last_dy = dx, dy
 
     current_task: str = "idle"
 
     def pop_rows_for_task(self, task_name):
         with self.lock:
-            matching = [r for r in self.rows if r[10] == task_name]
-            self.rows = [r for r in self.rows if r[10] != task_name]
+            matching = [r for r in self.rows if r[6] == task_name]
+            self.rows = [r for r in self.rows if r[6] != task_name]
         return matching
 
     def write_csv(self, rows, task_name):
@@ -179,6 +221,11 @@ async def ws_endpoint(websocket: WebSocket, session_uuid: str):
                     sess.record(
                         t=ev["t"], x=ev["x"], y=ev["y"],
                         event=ev["event"], button=ev.get("button", "none"),
+                        trial_id=ev.get("trial_id"),
+                        target_x=ev.get("target_x"), target_y=ev.get("target_y"),
+                        target_width=ev.get("target_width"), target_height=ev.get("target_height"),
+                        target_id=ev.get("target_id"),
+                        screen_width=ev.get("screen_width"), screen_height=ev.get("screen_height"),
                     )
 
             elif mtype == "end_task":
@@ -189,7 +236,7 @@ async def ws_endpoint(websocket: WebSocket, session_uuid: str):
 
             elif mtype == "finish":
                 # flush anything left (e.g. idle task not explicitly ended)
-                remaining_tasks = {r[10] for r in sess.rows}
+                remaining_tasks = {r[6] for r in sess.rows}
                 for t in remaining_tasks:
                     rows = sess.pop_rows_for_task(t)
                     sess.write_csv(rows, t)
@@ -215,7 +262,7 @@ async def ws_endpoint(websocket: WebSocket, session_uuid: str):
         # earlier "events" batches is safely on disk/in memory; only the
         # batch currently in flight (at most ~150ms of movement) is lost.
         if not sess.finished:
-            remaining_tasks = {r[10] for r in sess.rows}
+            remaining_tasks = {r[6] for r in sess.rows}
             for t in remaining_tasks:
                 rows = sess.pop_rows_for_task(t)
                 sess.write_csv(rows, t)

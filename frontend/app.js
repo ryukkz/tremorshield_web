@@ -22,6 +22,8 @@ let TASK_INFO = {};
 let taskIndex = 0;
 let currentTask = null;
 let taskEndAt = 0;
+let taskStartAt = 0;
+let currentTrialId = 0;
 let tickHandle = null;
 let flushHandle = null;
 let eventBuffer = [];
@@ -30,6 +32,8 @@ let eventBuffer = [];
 let dragState = { dragging: false, x: 100, y: 100, size: 60 };
 // target_selection state
 let fittsTarget = null;
+let trackingTarget = null;
+let fittsTargetSeq = 0;
 let trackingPhase = 0;
 // double-click heuristic state (mirrors task_protocol_gui.py _on_canvas_click)
 let lastClickTime = 0;
@@ -96,8 +100,34 @@ function flushBuffer() {
   eventBuffer = [];
 }
 
+function getTargetMeta() {
+  if (currentTask === "normal" || currentTask === "fast" || currentTask === "slow") {
+    if (!trackingTarget) return {};
+    return { target_x: trackingTarget.x, target_y: trackingTarget.y, target_width: 48, target_height: 48, target_id: "tracking_target" };
+  }
+  if (currentTask === "click" || currentTask === "double_click") {
+    return { target_x: canvas.width / 2, target_y: canvas.height / 2, target_width: 60, target_height: 60, target_id: "click_target" };
+  }
+  if (currentTask === "target_selection" && fittsTarget) {
+    return { target_x: fittsTarget.x, target_y: fittsTarget.y, target_width: fittsTarget.r * 2, target_height: fittsTarget.r * 2, target_id: fittsTarget.id };
+  }
+  if (currentTask === "precision") {
+    return { target_x: canvas.width / 2, target_y: canvas.height / 2, target_width: 20, target_height: 20, target_id: "precision_target" };
+  }
+  if (currentTask === "drag") {
+    return { target_x: canvas.width - 140, target_y: canvas.height - 140, target_width: 160, target_height: 160, target_id: "drag_drop_target" };
+  }
+  return {};
+}
+
 function pushEvent(x, y, event, button = "none") {
-  eventBuffer.push({ t: now(), x, y, event, button });
+  eventBuffer.push({
+    t: now(), x, y, event, button,
+    trial_id: currentTrialId,
+    screen_width: window.innerWidth,
+    screen_height: window.innerHeight,
+    ...getTargetMeta(),
+  });
 }
 
 // ---------------------------------------------------------------------
@@ -160,7 +190,8 @@ function spawnFittsTarget() {
   const r = 10 + Math.random() * 40;
   const x = r + 20 + Math.random() * (canvas.width - 2 * (r + 20));
   const y = r + 20 + Math.random() * (canvas.height - 2 * (r + 20));
-  fittsTarget = { x, y, r };
+  fittsTargetSeq += 1;
+  fittsTarget = { x, y, r, id: `fitts_target_${fittsTargetSeq}` };
 }
 
 function renderTrackingTarget() {
@@ -186,6 +217,7 @@ function renderTrackingTarget() {
     y = canvas.height / 2 + Math.sin(a * 1.35) * Math.min(usableH * 0.30, 190);
   }
 
+  trackingTarget = { x, y };
   drawTarget(x, y, 24, "#2563eb");
   ctx.beginPath();
   ctx.arc(x, y, 7, 0, Math.PI * 2);
@@ -250,8 +282,12 @@ function runTask(task) {
   resizeCanvas();
   dragState = { dragging: false, x: 100, y: 100, size: 60 };
   fittsTarget = null;
+  trackingTarget = null;
+  fittsTargetSeq = 0;
   eventBuffer = [];
-  taskEndAt = performance.now() + TASK_INFO[task].duration * 1000;
+  currentTrialId = taskIndex;
+  taskStartAt = performance.now();
+  taskEndAt = taskStartAt + TASK_INFO[task].duration * 1000;
 
   flushHandle = setInterval(flushBuffer, 150);
   tickHandle = setInterval(tick, 100);
